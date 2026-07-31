@@ -4,21 +4,21 @@ const { Client, GatewayIntentBits, EmbedBuilder, REST, Routes, SlashCommandBuild
 const app = express();
 app.use(express.json());
 
-// Variables desde Render
+// Configuraciones del Servidor Principal y Discord
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN; 
-const MAIN_SERVER_URL = process.env.MAIN_SERVER_URL || "https://montanahub-keys.onrender.com";
+const MAIN_SERVER_URL = "https://montanahub-keys.onrender.com";
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "MontanaHub2026";
 
 // -------------------------------------------------------------
-// 1. REGISTRO DEL COMANDO SLASH (/resethwid)
+// 1. REGISTRO OBLIGATORIO DEL COMANDO SLASH (/resethwid)
 // -------------------------------------------------------------
 const commands = [
     new SlashCommandBuilder()
         .setName('resethwid')
-        .setDescription('Reinicia el HWUID de una key en MontanaHub.')
+        .setDescription('Fuerza el reinicio de HWUID de una key en MontanaHub Keys.')
         .addStringOption(option =>
             option.setName('key')
-                .setDescription('La key a la que deseas borrarle el HWUID')
+                .setDescription('Ingresa la key exacta a resetear')
                 .setRequired(true))
 ].map(command => command.toJSON());
 
@@ -27,40 +27,40 @@ const client = new Client({
 });
 
 client.once('ready', async () => {
-    console.log(`🤖 Bot conectado como: ${client.user.tag}`);
+    console.log(`🤖 Bot listo y sincronizado como: ${client.user.tag}`);
 
     try {
         const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
-        console.log('🔄 Registrando comando /resethwid...');
-
         await rest.put(
             Routes.applicationCommands(client.user.id),
             { body: commands }
         );
-
-        console.log('✅ Comando /resethwid registrado correctamente.');
+        console.log('✅ Comando /resethwid registrado con éxito.');
     } catch (error) {
         console.error('❌ Error registrando comando:', error);
     }
 });
 
 // -------------------------------------------------------------
-// 2. LOGICA DEL COMANDO /resethwid
+// 2. EJECUCIÓN DEL RESET DIRECTO EN MONTANAHUB-KEYS
 // -------------------------------------------------------------
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
 
     if (interaction.commandName === 'resethwid') {
-        const targetKey = interaction.options.getString('key');
+        const targetKey = interaction.options.getString('key').trim();
 
-        // Avisamos a la interacción que procesaremos el pedido
+        // Respuesta temporal mientras el bot contacta a montanahub-keys
         await interaction.deferReply();
 
         try {
-            // Le pedimos a tu servidor de keys (montanahub-keys) que reseteé el HWUID
+            // Petición POST forzada hacia montanahub-keys.onrender.com
             const response = await fetch(`${MAIN_SERVER_URL}/reset-hwuid`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'MontanaHub-Discord-Bot'
+                },
                 body: JSON.stringify({
                     key: targetKey,
                     secret: ADMIN_SECRET
@@ -69,30 +69,39 @@ client.on('interactionCreate', async (interaction) => {
 
             const data = await response.json();
 
-            if (data.success || response.ok) {
+            // Si el servidor confirma el reset
+            if (response.ok && data.success) {
                 const embed = new EmbedBuilder()
-                    .setTitle("🔄 HWUID Reiniciado")
+                    .setTitle("🔄 HWUID Reiniciado con Éxito")
                     .setColor(0x00FF00)
-                    .setDescription(`El HWUID para la key \`${targetKey}\` fue eliminado exitosamente en **MontanaHub Keys**. El usuario ya puede vincular su nuevo dispositivo.`)
-                    .setFooter({ text: "Montana Hub Security System" });
+                    .setDescription(`La key \`${targetKey}\` fue liberada exitosamente en **montanahub-keys.onrender.com**.`)
+                    .addFields(
+                        { name: "Estado:", value: "✅ HWUID limpiado. Lista para un nuevo dispositivo." }
+                    )
+                    .setFooter({ text: "Montana Hub System" });
 
                 return interaction.editReply({ embeds: [embed] });
             } else {
-                return interaction.editReply({ content: `❌ Error del servidor: ${data.message || "No se pudo resetear la key."}` });
+                // Respuesta si la key no existe o hay error en el servidor principal
+                return interaction.editReply({ 
+                    content: `❌ **No se pudo resetear:** ${data.message || "La key no existe en montanahub-keys."}` 
+                });
             }
         } catch (error) {
             console.error('Error al conectar con el servidor principal:', error);
-            return interaction.editReply({ content: '❌ Error de conexión con el servidor principal de keys.' });
+            return interaction.editReply({ 
+                content: `❌ **Error de conexión:** No se pudo contactar a \`${MAIN_SERVER_URL}\`. Verifica que el servidor principal esté activo.` 
+            });
         }
     }
 });
 
-// Iniciar sesión en Discord
+// Iniciar Bot
 if (DISCORD_TOKEN) {
     client.login(DISCORD_TOKEN);
 }
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`🚀 Servicio de Discord Bot corriendo en puerto ${PORT}`);
+    console.log(`🚀 Servicio puente de Discord en puerto ${PORT}`);
 });
