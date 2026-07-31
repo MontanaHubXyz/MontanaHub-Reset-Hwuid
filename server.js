@@ -9,7 +9,7 @@ const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 // Base de datos de Keys en memoria
 const keysDB = {};
 
-// Función para generar texto aleatorio exacto (Letras mayúsculas y números)
+// Función para generar texto aleatorio exacto
 function generarBloque(longitud) {
     const caracteres = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     let resultado = '';
@@ -23,7 +23,6 @@ function generarBloque(longitud) {
 // 1. RUTAS PARA TU SCRIPT DE ROBLOX
 // -------------------------------------------------------------
 
-// Ruta principal para iniciar sesión
 app.post('/verify', (req, res) => {
     const { key, hwuid } = req.body;
 
@@ -33,30 +32,33 @@ app.post('/verify', (req, res) => {
 
     const keyData = keysDB[key];
 
-    // Verificar si le queda tiempo de juego
-    if (keyData.timeLeft <= 0) {
+    // Verificar si le queda tiempo de juego (Si es -1, es Permanente)
+    if (keyData.timeLeft !== -1 && keyData.timeLeft <= 0) {
         return res.json({ valid: false, message: "⏳ El tiempo de juego de esta key se ha agotado." });
     }
 
     // Lógica de Dispositivos (HWUID)
     if (!keyData.hwuid) {
-        // Primer uso: Vinculamos la key a este celular
         keyData.hwuid = hwuid;
     } else if (keyData.hwuid !== hwuid) {
-        // Intento de uso en otro dispositivo
         return res.json({ valid: false, message: "📱 HWUID incorrecto. Pide un Reset de HWID en Discord." });
     }
 
     return res.json({ valid: true, message: "✅ Acceso concedido.", timeLeft: keyData.timeLeft });
 });
 
-// Ruta de "Latido": El script de Roblox llamará aquí cada 1 minuto para descontar tiempo
+// Ruta de "Latido": El script de Roblox descontará 60 segundos por latido
 app.post('/heartbeat', (req, res) => {
     const { key, hwuid } = req.body;
 
     if (keysDB[key] && keysDB[key].hwuid === hwuid) {
+        if (keysDB[key].timeLeft === -1) {
+            // Es permanente, no descontamos nada
+            return res.json({ valid: true, timeLeft: "Permanente" });
+        }
+        
         if (keysDB[key].timeLeft > 0) {
-            keysDB[key].timeLeft -= 1; // Resta 1 minuto de juego
+            keysDB[key].timeLeft -= 60; // Resta 60 segundos
             return res.json({ valid: true, timeLeft: keysDB[key].timeLeft });
         } else {
             return res.json({ valid: false, message: "Tiempo de juego agotado." });
@@ -71,13 +73,25 @@ app.post('/heartbeat', (req, res) => {
 const commands = [
     new SlashCommandBuilder()
         .setName('genkey')
-        .setDescription('Genera keys basadas en TIEMPO DE JUEGO (solo se gasta jugando).')
+        .setDescription('Genera keys para Montana Hub.')
         .addIntegerOption(opt => opt.setName('cantidad').setDescription('¿Cuántas keys quieres crear?').setRequired(true))
-        .addIntegerOption(opt => opt.setName('horas').setDescription('¿Cuántas horas de juego tendrá cada key?').setRequired(true)),
+        .addStringOption(opt => 
+            opt.setName('unidad')
+                .setDescription('Elige el tipo de duración')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'Permanente', value: 'permanente' },
+                    { name: 'Años', value: 'años' },
+                    { name: 'Meses', value: 'meses' },
+                    { name: 'Horas', value: 'horas' },
+                    { name: 'Minutos', value: 'minutos' },
+                    { name: 'Segundos', value: 'segundos' }
+                ))
+        .addIntegerOption(opt => opt.setName('tiempo').setDescription('¿Cuánto tiempo? (Pon 0 si elegiste Permanente)').setRequired(true)),
     
     new SlashCommandBuilder()
         .setName('resethwid')
-        .setDescription('Libera la key para poder usarla en un nuevo dispositivo.')
+        .setDescription('Libera la key para usarla en un nuevo dispositivo.')
         .addStringOption(opt => opt.setName('key').setDescription('Escribe la key a resetear').setRequired(true))
 ].map(command => command.toJSON());
 
@@ -93,25 +107,47 @@ client.once('ready', async () => {
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
 
-    // COMANDO /genkey
     if (interaction.commandName === 'genkey') {
         const cantidad = interaction.options.getInteger('cantidad');
-        const horas = interaction.options.getInteger('horas');
+        const unidad = interaction.options.getString('unidad');
+        const tiempo = interaction.options.getInteger('tiempo');
+        
+        let tiempoSegundos = 0;
+        let displayTiempo = '';
+
+        // Convertir la opción a segundos reales
+        if (unidad === 'permanente') {
+            tiempoSegundos = -1; // -1 significa infinito/permanente
+            displayTiempo = 'Permanente ∞';
+        } else if (unidad === 'años') {
+            tiempoSegundos = tiempo * 31536000;
+            displayTiempo = `${tiempo} Año(s)`;
+        } else if (unidad === 'meses') {
+            tiempoSegundos = tiempo * 2592000;
+            displayTiempo = `${tiempo} Mes(es)`;
+        } else if (unidad === 'horas') {
+            tiempoSegundos = tiempo * 3600;
+            displayTiempo = `${tiempo} Hora(s)`;
+        } else if (unidad === 'minutos') {
+            tiempoSegundos = tiempo * 60;
+            displayTiempo = `${tiempo} Minuto(s)`;
+        } else if (unidad === 'segundos') {
+            tiempoSegundos = tiempo;
+            displayTiempo = `${tiempo} Segundo(s)`;
+        }
         
         let generatedKeys = [];
         
         for(let i = 0; i < cantidad; i++) {
-            // AQUI APLICAMOS TU NUEVO FORMATO: MNTHUB-XXXXX-XXXXX-XXXXXX
             const p1 = generarBloque(5);
             const p2 = generarBloque(5);
             const p3 = generarBloque(6);
             
             const newKey = `MNTHUB-${p1}-${p2}-${p3}`;
             
-            // Guardamos el tiempo en minutos (horas * 60)
             keysDB[newKey] = {
-                hwuid: null, // Listo para vincularse al primer dispositivo
-                timeLeft: horas * 60 
+                hwuid: null,
+                timeLeft: tiempoSegundos 
             };
             generatedKeys.push(newKey);
         }
@@ -119,23 +155,22 @@ client.on('interactionCreate', async (interaction) => {
         const embed = new EmbedBuilder()
             .setTitle("🔑 Keys Generadas Exitosamente")
             .setColor(0x00FF00)
-            .setDescription(`Se crearon **${cantidad}** keys.\nDuración activa: **${horas} horas** de juego c/u.\n\n\`\`\`\n${generatedKeys.join('\n')}\n\`\`\``)
+            .setDescription(`Se crearon **${cantidad}** keys.\nDuración de juego: **${displayTiempo}**\n\n\`\`\`\n${generatedKeys.join('\n')}\n\`\`\``)
             .setFooter({ text: "Montana Hub Security" });
 
         return interaction.reply({ embeds: [embed] });
     }
 
-    // COMANDO /resethwid
     if (interaction.commandName === 'resethwid') {
         const targetKey = interaction.options.getString('key').trim();
 
         if (keysDB[targetKey]) {
-            keysDB[targetKey].hwuid = null; // Borramos el rastro del celular anterior
+            keysDB[targetKey].hwuid = null;
             
             const embed = new EmbedBuilder()
                 .setTitle("🔄 HWUID Reiniciado")
                 .setColor(0x00FF00)
-                .setDescription(`El dispositivo de la key \`${targetKey}\` fue eliminado. El usuario ya puede ponerla en su nuevo celular.`)
+                .setDescription(`El dispositivo de la key \`${targetKey}\` fue eliminado.`)
                 .setFooter({ text: "Montana Hub Security" });
                 
             return interaction.reply({ embeds: [embed] });
