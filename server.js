@@ -1,15 +1,43 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const { Client, GatewayIntentBits, EmbedBuilder, REST, Routes, SlashCommandBuilder } = require('discord.js');
 
 const app = express();
 app.use(express.json());
 
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN; 
+// ==========================================
+// 1. CONFIGURACIÓN Y VARIABLES DE ENTORNO
+// ==========================================
+// Necesitarás agregar MONGODB_URI en las variables de entorno de Render
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const MONGODB_URI = process.env.MONGODB_URI; 
 
-// Base de datos de Keys en memoria RAM (Estructura optimizada con marca de tiempo real)
-const keysDB = {};
+if (!MONGODB_URI) {
+    console.error("⚠️ FATAL ERROR: Falta la variable MONGODB_URI. El servidor no puede guardar keys permanentemente.");
+}
 
-// Función segura para generar el formato: MNTHUB-EF893-JE473-IW9826
+// ==========================================
+// 2. CONEXIÓN A LA BASE DE DATOS (INMORTAL)
+// ==========================================
+mongoose.connect(MONGODB_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true
+}).then(() => {
+    console.log("🟢 Conectado a MongoDB Exitosamente. Las keys ahora son inmortales.");
+}).catch((err) => {
+    console.error("🔴 Error conectando a MongoDB:", err);
+});
+
+// Modelo de la Base de Datos para las Keys
+const keySchema = new mongoose.Schema({
+    key: { type: String, required: true, unique: true },
+    hwuid: { type: String, default: null },
+    expiration: { type: Number, required: true } // -1 = Permanente, de lo contrario Timestamp Unix
+});
+
+const KeyModel = mongoose.model('Key', keySchema);
+
+// Función para generar la estructura de la key
 function generarKeyFormateada() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     const randomBlock = (len) => {
@@ -19,80 +47,93 @@ function generarKeyFormateada() {
         }
         return res;
     };
-
     return `MNTHUB-${randomBlock(5)}-${randomBlock(5)}-${randomBlock(6)}`;
 }
 
-// -------------------------------------------------------------
-// 1. ENDPOINTS PARA EL SCRIPT DE ROBLOX (BLOCK SPIN)
-// -------------------------------------------------------------
+// ==========================================
+// 3. ENDPOINTS PARA EL SCRIPT DE BLOCK SPIN
+// ==========================================
 
-// Verificar la key y vincular el HWUID la primera vez con tiempo real
-app.post('/verify', (req, res) => {
-    const { key, hwuid } = req.body;
+app.post('/verify', async (req, res) => {
+    try {
+        const { key, hwuid } = req.body;
 
-    if (!key || !keysDB[key]) {
-        return res.json({ valid: false, message: "❌ Key inválida o inexistente." });
-    }
+        if (!key || !hwuid) {
+            return res.json({ valid: false, message: "❌ Faltan datos (Key o HWUID)." });
+        }
 
-    const keyData = keysDB[key];
-    const ahora = Math.floor(Date.now() / 1000); // Tiempo actual en segundos Unix
+        const keyData = await KeyModel.findOne({ key: key });
 
-    // Validación de Tiempo Real (Si no es permanente y ya pasó la fecha de expiración)
-    if (keyData.expiration !== -1 && ahora >= keyData.expiration) {
-        return res.json({ valid: false, message: "⏳ El tiempo de juego de esta key se ha agotado." });
-    }
+        if (!keyData) {
+            return res.json({ valid: false, message: "❌ Key inválida o inexistente." });
+        }
 
-    // Control de Dispositivo (HWUID)
-    if (!keyData.hwuid) {
-        keyData.hwuid = hwuid; // Primer uso, se ancla al dispositivo del usuario (Samsung A17)
-    } else if (keyData.hwuid !== hwuid) {
-        return res.json({ valid: false, message: "📱 HWUID incorrecto. Esta key está registrada en otro dispositivo. Usa /resethwid en Discord." });
-    }
+        const ahora = Math.floor(Date.now() / 1000);
 
-    // Calcular segundos exactos restantes para enviárselos al script de Roblox
-    let tiempoRestante = -1;
-    if (keyData.expiration !== -1) {
-        tiempoRestante = keyData.expiration - ahora;
-        if (tiempoRestante < 0) tiempoRestante = 0;
-    }
+        // Validación de Tiempo Real para Keys Temporales
+        if (keyData.expiration !== -1 && ahora >= keyData.expiration) {
+            return res.json({ valid: false, message: "⏳ El tiempo de juego de esta key se ha agotado." });
+        }
 
-    return res.json({ 
-        valid: true, 
-        message: "✅ Acceso concedido a Montana Hub.", 
-        timeLeft: tiempoRestante 
-    });
-});
+        // Sistema HWUID estricto
+        if (!keyData.hwuid || keyData.hwuid === "") {
+            keyData.hwuid = hwuid; 
+            await keyData.save(); // Se ancla al dispositivo permanentemente en la nube
+        } else if (keyData.hwuid !== hwuid) {
+            return res.json({ valid: false, message: "📱 HWUID incorrecto. Esta key está en otro dispositivo. Usa /resethwid." });
+        }
 
-// Latido (Heartbeat): Comprueba en tiempo real si la key sigue vigente sin alterar contadores falsos
-app.post('/heartbeat', (req, res) => {
-    const { key, hwuid } = req.body;
+        // Calcular tiempo restante
+        let tiempoRestante = -1;
+        if (keyData.expiration !== -1) {
+            tiempoRestante = keyData.expiration - ahora;
+            if (tiempoRestante < 0) tiempoRestante = 0;
+        }
 
-    if (!keysDB[key] || keysDB[key].hwuid !== hwuid) {
-        return res.status(403).json({ valid: false, message: "Sesión no autorizada o HWUID cambiado." });
-    }
+        return res.json({ 
+            valid: true, 
+            message: "✅ Acceso concedido a Montana Hub.", 
+            timeLeft: tiempoRestante 
+        });
 
-    const keyData = keysDB[key];
-    const ahora = Math.floor(Date.now() / 1000);
-
-    // Si es permanente, responde de inmediato sin caducar nunca
-    if (keyData.expiration === -1) {
-        return res.json({ valid: true, timeLeft: -1 });
-    }
-
-    // Calcular tiempo restante real restando la hora actual del servidor
-    let timeLeft = keyData.expiration - ahora;
-
-    if (timeLeft > 0) {
-        return res.json({ valid: true, timeLeft: timeLeft });
-    } else {
-        return res.json({ valid: false, message: "Tiempo agotado." });
+    } catch (error) {
+        console.error("Error en /verify:", error);
+        return res.json({ valid: false, message: "❌ Error interno del servidor." });
     }
 });
 
-// -------------------------------------------------------------
-// 2. COMANDOS SLASH DE DISCORD
-// -------------------------------------------------------------
+app.post('/heartbeat', async (req, res) => {
+    try {
+        const { key, hwuid } = req.body;
+        const keyData = await KeyModel.findOne({ key: key });
+
+        if (!keyData || keyData.hwuid !== hwuid) {
+            return res.json({ valid: false, message: "Sesión no autorizada o HWUID cambiado." });
+        }
+
+        const ahora = Math.floor(Date.now() / 1000);
+
+        // Si es permanente (-1), sigue funcionando eternamente
+        if (keyData.expiration === -1) {
+            return res.json({ valid: true, timeLeft: -1 });
+        }
+
+        let timeLeft = keyData.expiration - ahora;
+
+        if (timeLeft > 0) {
+            return res.json({ valid: true, timeLeft: timeLeft });
+        } else {
+            return res.json({ valid: false, message: "Tiempo agotado." });
+        }
+    } catch (error) {
+        return res.json({ valid: false });
+    }
+});
+
+// ==========================================
+// 4. BOT DE DISCORD Y COMANDOS SLASH
+// ==========================================
+
 const commands = [
     new SlashCommandBuilder()
         .setName('genkey')
@@ -143,7 +184,6 @@ client.once('ready', async () => {
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
 
-    // COMANDO /genkey
     if (interaction.commandName === 'genkey') {
         const cantidad = interaction.options.getInteger('cantidad');
         const unidad = interaction.options.getString('unidad');
@@ -154,7 +194,7 @@ client.on('interactionCreate', async (interaction) => {
         const ahora = Math.floor(Date.now() / 1000);
 
         if (unidad === 'permanente') {
-            segundosASumar = -1; // -1 indica infinito real
+            segundosASumar = -1;
             textoDuracion = '♾️ Permanente';
         } else if (unidad === 'anos') {
             segundosASumar = tiempo * 31536000;
@@ -175,59 +215,77 @@ client.on('interactionCreate', async (interaction) => {
         
         let listaKeys = [];
         
-        for (let i = 0; i < cantidad; i++) {
-            const nuevaKey = generarKeyFormateada();
-            
-            // Calculamos la fecha exacta de expiración sumándole los segundos a la hora actual de Unix
-            const expirationTimestamp = (segundosASumar === -1) ? -1 : (ahora + segundosASumar);
+        await interaction.deferReply(); // Evitar que Discord tire "La interacción falló" si demora
 
-            keysDB[nuevaKey] = {
-                hwuid: null,
-                expiration: expirationTimestamp // ¡Guardamos el sello de tiempo real absoluto!
-            };
-            listaKeys.push(nuevaKey);
+        try {
+            for (let i = 0; i < cantidad; i++) {
+                const nuevaKey = generarKeyFormateada();
+                const expirationTimestamp = (segundosASumar === -1) ? -1 : (ahora + segundosASumar);
+
+                // Guardar directamente en MongoDB
+                await KeyModel.create({
+                    key: nuevaKey,
+                    hwuid: null,
+                    expiration: expirationTimestamp
+                });
+                
+                listaKeys.push(nuevaKey);
+            }
+
+            const keysFormateadasParaCopiar = listaKeys.map(k => `\`${k}\``).join('\n');
+
+            const embed = new EmbedBuilder()
+                .setTitle("🔑 Generador de Keys - Montana Hub")
+                .setColor(0x00FF00)
+                .addFields(
+                    { name: "📊 Cantidad:", value: `${cantidad}`, inline: true },
+                    { name: "⏳ Duración de Juego:", value: textoDuracion, inline: true },
+                    { name: "📋 Keys Generadas (Toca para copiar):", value: keysFormateadasParaCopiar }
+                )
+                .setFooter({ text: "Montana Hub Security System" });
+
+            return interaction.editReply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error("Error generando keys:", error);
+            return interaction.editReply({ content: "❌ Ocurrió un error al generar las keys en la base de datos." });
         }
-
-        const keysFormateadasParaCopiar = listaKeys.map(k => `\`${k}\``).join('\n');
-
-        const embed = new EmbedBuilder()
-            .setTitle("🔑 Generador de Keys - Montana Hub")
-            .setColor(0x00FF00)
-            .addFields(
-                { name: "📊 Cantidad:", value: `${cantidad}`, inline: true },
-                { name: "⏳ Duración de Juego:", value: textoDuracion, inline: true },
-                { name: "📋 Keys Generadas (Toca para copiar):", value: keysFormateadasParaCopiar }
-            )
-            .setFooter({ text: "Montana Hub Security System" });
-
-        return interaction.reply({ embeds: [embed] });
     }
 
-    // COMANDO /resethwid
     if (interaction.commandName === 'resethwid') {
         const targetKey = interaction.options.getString('key').trim();
+        await interaction.deferReply();
 
-        if (keysDB[targetKey]) {
-            keysDB[targetKey].hwuid = null; // Reiniciamos el HWUID para liberar la key
-            
-            const embed = new EmbedBuilder()
-                .setTitle("🔄 HWUID Reiniciado con Éxito")
-                .setColor(0x0099FF)
-                .setDescription(`La key \`${targetKey}\` ya está libre de dispositivo y lista para usarse en uno nuevo.`)
-                .setFooter({ text: "Montana Hub Security" });
+        try {
+            const keyData = await KeyModel.findOne({ key: targetKey });
+
+            if (keyData) {
+                keyData.hwuid = null;
+                await keyData.save(); // Se limpia el dispositivo en MongoDB
                 
-            return interaction.reply({ embeds: [embed] });
-        } else {
-            return interaction.reply({ 
-                content: `❌ La key \`${targetKey}\` no existe en la base de datos. Revisa que esté bien escrita.`, 
-                ephemeral: true 
-            });
+                const embed = new EmbedBuilder()
+                    .setTitle("🔄 HWUID Reiniciado con Éxito")
+                    .setColor(0x0099FF)
+                    .setDescription(`La key \`${targetKey}\` ya está libre de dispositivo y lista para usarse.`)
+                    .setFooter({ text: "Montana Hub Security" });
+                    
+                return interaction.editReply({ embeds: [embed] });
+            } else {
+                return interaction.editReply({ content: `❌ La key \`${targetKey}\` no existe en la base de datos.` });
+            }
+        } catch (error) {
+            return interaction.editReply({ content: "❌ Error de conexión con la base de datos al resetear el HWUID." });
         }
     }
 });
 
-if (DISCORD_TOKEN) client.login(DISCORD_TOKEN);
+if (DISCORD_TOKEN) {
+    client.login(DISCORD_TOKEN).catch(err => console.error("Error conectando a Discord:", err));
+}
 
+// ==========================================
+// 5. INICIAR EL SERVIDOR WEB
+// ==========================================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Servidor y Bot activos en el puerto ${PORT}`));
 
