@@ -6,7 +6,7 @@ app.use(express.json());
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN; 
 
-// Base de datos de Keys en memoria
+// Base de datos de Keys en memoria RAM (Estructura optimizada con marca de tiempo real)
 const keysDB = {};
 
 // Función segura para generar el formato: MNTHUB-EF893-JE473-IW9826
@@ -27,7 +27,7 @@ function generarKeyFormateada() {
 // 1. ENDPOINTS PARA EL SCRIPT DE ROBLOX (BLOCK SPIN)
 // -------------------------------------------------------------
 
-// Verificar la key y vincular el HWUID la primera vez
+// Verificar la key y vincular el HWUID la primera vez con tiempo real
 app.post('/verify', (req, res) => {
     const { key, hwuid } = req.body;
 
@@ -36,46 +36,55 @@ app.post('/verify', (req, res) => {
     }
 
     const keyData = keysDB[key];
+    const ahora = Math.floor(Date.now() / 1000); // Tiempo actual en segundos Unix
 
-    // Si no es permanente y el tiempo llegó a 0
-    if (keyData.timeLeft !== -1 && keyData.timeLeft <= 0) {
+    // Validación de Tiempo Real (Si no es permanente y ya pasó la fecha de expiración)
+    if (keyData.expiration !== -1 && ahora >= keyData.expiration) {
         return res.json({ valid: false, message: "⏳ El tiempo de juego de esta key se ha agotado." });
     }
 
     // Control de Dispositivo (HWUID)
     if (!keyData.hwuid) {
-        keyData.hwuid = hwuid; // Primer uso, se queda anclado a este dispositivo
+        keyData.hwuid = hwuid; // Primer uso, se ancla al dispositivo del usuario (Samsung A17)
     } else if (keyData.hwuid !== hwuid) {
         return res.json({ valid: false, message: "📱 HWUID incorrecto. Esta key está registrada en otro dispositivo. Usa /resethwid en Discord." });
+    }
+
+    // Calcular segundos exactos restantes para enviárselos al script de Roblox
+    let tiempoRestante = -1;
+    if (keyData.expiration !== -1) {
+        tiempoRestante = keyData.expiration - ahora;
+        if (tiempoRestante < 0) tiempoRestante = 0;
     }
 
     return res.json({ 
         valid: true, 
         message: "✅ Acceso concedido a Montana Hub.", 
-        timeLeft: keyData.timeLeft 
+        timeLeft: tiempoRestante 
     });
 });
 
-// Latido (Heartbeat): Resta tiempo en tiempo real cada 1 minuto de juego activo
+// Latido (Heartbeat): Comprueba en tiempo real si la key sigue vigente sin alterar contadores falsos
 app.post('/heartbeat', (req, res) => {
     const { key, hwuid } = req.body;
 
     if (!keysDB[key] || keysDB[key].hwuid !== hwuid) {
-        return res.status(403).json({ valid: false, message: "Sesión no autorizada." });
+        return res.status(403).json({ valid: false, message: "Sesión no autorizada o HWUID cambiado." });
     }
 
     const keyData = keysDB[key];
+    const ahora = Math.floor(Date.now() / 1000);
 
-    // Si es permanente, no descontamos nada
-    if (keyData.timeLeft === -1) {
-        return res.json({ valid: true, timeLeft: "Permanente" });
+    // Si es permanente, responde de inmediato sin caducar nunca
+    if (keyData.expiration === -1) {
+        return res.json({ valid: true, timeLeft: -1 });
     }
 
-    if (keyData.timeLeft > 0) {
-        keyData.timeLeft -= 60; // Resta 60 segundos (1 minuto de juego)
-        if (keyData.timeLeft < 0) keyData.timeLeft = 0;
-        
-        return res.json({ valid: true, timeLeft: keyData.timeLeft });
+    // Calcular tiempo restante real restando la hora actual del servidor
+    let timeLeft = keyData.expiration - ahora;
+
+    if (timeLeft > 0) {
+        return res.json({ valid: true, timeLeft: timeLeft });
     } else {
         return res.json({ valid: false, message: "Tiempo agotado." });
     }
@@ -140,26 +149,27 @@ client.on('interactionCreate', async (interaction) => {
         const unidad = interaction.options.getString('unidad');
         const tiempo = interaction.options.getInteger('tiempo');
         
-        let tiempoSegundos = 0;
+        let segundosASumar = 0;
         let textoDuracion = '';
+        const ahora = Math.floor(Date.now() / 1000);
 
         if (unidad === 'permanente') {
-            tiempoSegundos = -1;
+            segundosASumar = -1; // -1 indica infinito real
             textoDuracion = '♾️ Permanente';
         } else if (unidad === 'anos') {
-            tiempoSegundos = tiempo * 31536000;
+            segundosASumar = tiempo * 31536000;
             textoDuracion = `${tiempo} Año(s)`;
         } else if (unidad === 'meses') {
-            tiempoSegundos = tiempo * 2592000;
+            segundosASumar = tiempo * 2592000;
             textoDuracion = `${tiempo} Mes(es)`;
         } else if (unidad === 'horas') {
-            tiempoSegundos = tiempo * 3600;
+            segundosASumar = tiempo * 3600;
             textoDuracion = `${tiempo} Hora(s)`;
         } else if (unidad === 'minutos') {
-            tiempoSegundos = tiempo * 60;
+            segundosASumar = tiempo * 60;
             textoDuracion = `${tiempo} Minuto(s)`;
         } else if (unidad === 'segundos') {
-            tiempoSegundos = tiempo;
+            segundosASumar = tiempo;
             textoDuracion = `${tiempo} Segundo(s)`;
         }
         
@@ -167,14 +177,17 @@ client.on('interactionCreate', async (interaction) => {
         
         for (let i = 0; i < cantidad; i++) {
             const nuevaKey = generarKeyFormateada();
+            
+            // Calculamos la fecha exacta de expiración sumándole los segundos a la hora actual de Unix
+            const expirationTimestamp = (segundosASumar === -1) ? -1 : (ahora + segundosASumar);
+
             keysDB[nuevaKey] = {
                 hwuid: null,
-                timeLeft: tiempoSegundos
+                expiration: expirationTimestamp // ¡Guardamos el sello de tiempo real absoluto!
             };
             listaKeys.push(nuevaKey);
         }
 
-        // Diseño en bloque individual para que al mantener presionado en móvil se copie fácil
         const keysFormateadasParaCopiar = listaKeys.map(k => `\`${k}\``).join('\n');
 
         const embed = new EmbedBuilder()
@@ -195,7 +208,7 @@ client.on('interactionCreate', async (interaction) => {
         const targetKey = interaction.options.getString('key').trim();
 
         if (keysDB[targetKey]) {
-            keysDB[targetKey].hwuid = null; // Reiniciamos el dispositivo vinculado
+            keysDB[targetKey].hwuid = null; // Reiniciamos el HWUID para liberar la key
             
             const embed = new EmbedBuilder()
                 .setTitle("🔄 HWUID Reiniciado con Éxito")
@@ -217,3 +230,4 @@ if (DISCORD_TOKEN) client.login(DISCORD_TOKEN);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Servidor y Bot activos en el puerto ${PORT}`));
+
